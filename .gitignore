@@ -6,3 +6,4 @@
 data/
 hf_cache/
 slurm_outputs/
+models/

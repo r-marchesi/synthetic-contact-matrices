@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=sc_rq1_gemma2
+#SBATCH --job-name=gen_rq1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=10
 #SBATCH --partition=h200
@@ -14,7 +14,6 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=rmarchesi@fbk.eu
 
-# Capture split parameter passed from master script
 SPLIT=$1
 
 if [ -z "$SPLIT" ]; then
@@ -22,19 +21,14 @@ if [ -z "$SPLIT" ]; then
   exit 1
 fi
 
-echo "Starting Gemma 2 (9B) Fine-Tuning Job..."
-echo "Processing Split: $SPLIT"
+echo "Starting vLLM Generation for Split: $SPLIT"
 
 cd /storage/DSH/projects/synthetic-contact-matrices
-mkdir -p slurm_outputs
+mkdir -p data/results
 
-source .env
+export HF_TOKEN="hf_your_new_token_here"
 export HF_HOME="/storage/DSH/projects/synthetic-contact-matrices/hf_cache"
 
-export MASTER_ADDR="127.0.0.1"
-export MASTER_PORT=$((25000 + SLURM_JOB_ID % 10000))
-
-python scripts/03_fine_tune.py \
-    --train_file data/splits/train_${SPLIT}.jsonl \
-    --model_name "google/gemma-2-9b-it" \
-    --output_dir models/gemma2-9b-contact-${SPLIT}
+python scripts/04_generate.py \
+    --adapter_path "models/gemma2-9b-contact-${SPLIT}" \
+    --output_file "data/results/generated_contacts_${SPLIT}.jsonl"

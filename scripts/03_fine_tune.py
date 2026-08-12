@@ -5,18 +5,11 @@ from datasets import load_dataset
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    TrainingArguments
+    TrainingArguments,
+    Trainer,
+    DataCollatorForLanguageModeling
 )
 from peft import LoraConfig, get_peft_model
-from trl import SFTTrainer
-
-def format_chat_template(example, tokenizer):
-    example["text"] = tokenizer.apply_chat_template(
-        example["messages"], 
-        tokenize=False, 
-        add_generation_prompt=False
-    )
-    return example
 
 def train_lora(args):
     print(f"Loading dataset from {args.train_file}...")
@@ -25,10 +18,36 @@ def train_lora(args):
     print(f"Loading tokenizer for {args.model_name}...")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     
+    # Setup padding token and explicitly set right-padding for Causal LM
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"
 
-    dataset = dataset.map(lambda x: format_chat_template(x, tokenizer), num_proc=4)
+    def preprocess_function(examples):
+        # Because batched=True, examples["messages"] is a list of lists
+        texts = [
+            tokenizer.apply_chat_template(
+                msg, 
+                tokenize=False, 
+                add_generation_prompt=False
+            ) for msg in examples["messages"]
+        ]
+        
+        # Tokenize without padding (the collator pads dynamically per batch)
+        return tokenizer(
+            texts,
+            truncation=True,
+            max_length=2048,
+            padding=False
+        )
+
+    print("Tokenizing dataset...")
+    dataset = dataset.map(
+        preprocess_function, 
+        batched=True, 
+        num_proc=4, 
+        remove_columns=dataset.column_names
+    )
 
     print(f"Loading base model {args.model_name} in bfloat16...")
     model = AutoModelForCausalLM.from_pretrained(
@@ -37,7 +56,6 @@ def train_lora(args):
         device_map="auto"
     )
 
-    # Locked-in Expert Hyperparameters for Gemma-2 JSON Generation
     lora_config = LoraConfig(
         r=16,
         lora_alpha=32,
@@ -46,10 +64,15 @@ def train_lora(args):
         task_type="CAUSAL_LM"
     )
 
+    print("Applying LoRA adapter to model...")
+    model = get_peft_model(model, lora_config)
+    model.print_trainable_parameters()
+
     training_args = TrainingArguments(
         output_dir=args.output_dir,
-        per_device_train_batch_size=4,
-        gradient_accumulation_steps=4,
+        per_device_train_batch_size=1,            # Lowered from 4 to 1
+        gradient_accumulation_steps=16,           # Raised from 4 to 16
+        gradient_checkpointing=True,              # Added this line
         learning_rate=1e-4,
         lr_scheduler_type="cosine",
         warmup_steps=50,
@@ -61,15 +84,13 @@ def train_lora(args):
         report_to="none"
     )
 
-    print("Initializing SFTTrainer...")
-    trainer = SFTTrainer(
+    print("Initializing standard Trainer...")
+    # mlm=False tells the collator to automatically build causal 'labels' padded with -100
+    trainer = Trainer(
         model=model,
         train_dataset=dataset,
-        dataset_text_field="text",
-        peft_config=lora_config,
-        max_seq_length=2048,
-        tokenizer=tokenizer,
-        args=training_args
+        args=training_args,
+        data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
     )
 
     print("Starting training...")
@@ -82,7 +103,7 @@ def train_lora(args):
     print("Training complete.")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Standard bfloat16 LoRA Fine-tuning for Contact Matrices")
+    parser = argparse.ArgumentParser(description="Standard bfloat16 LoRA Fine-tuning")
     parser.add_argument("--train_file", type=str, required=True, help="Path to the JSONL training split")
     parser.add_argument("--model_name", type=str, default="google/gemma-2-9b-it", help="HuggingFace Model ID")
     parser.add_argument("--output_dir", type=str, required=True, help="Directory to save the LoRA adapter")
