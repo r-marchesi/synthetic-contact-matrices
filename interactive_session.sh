@@ -1,0 +1,14 @@
+srun \
+--job-name="raffo" \
+--partition=h200 \
+--nodelist=euler \
+--gres=gpu:1g.35gb:1 \
+--cpus-per-task=4 \
+--mem=50G \
+--time=03:00:00 \
+--qos=expedite \
+--container-mounts="/storage/DSH/personal/rmarchesi/,/storage/DSH/projects/synthetic-contact-matrices/,/mnt/md0/data" \
+--container-image="/storage/DSH/projects/synthetic-contact-matrices/image.sqsh" \
+--container-save="/storage/DSH/projects/synthetic-contact-matrices/image_update.sqsh" \
+--container-remap-root \
+--pty bash

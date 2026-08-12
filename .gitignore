@@ -1,6 +1,6 @@
 *.sqsh
 
-*.sh
+.env
 
 # Ignore large data and cache folders
 data/
