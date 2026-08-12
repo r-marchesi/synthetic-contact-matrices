@@ -1,0 +1,8 @@
+*.sqsh
+
+*.sh
+
+# Ignore large data and cache folders
+data/
+hf_cache/
+slurm_outputs/
