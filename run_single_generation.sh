@@ -26,9 +26,10 @@ echo "Starting vLLM Generation for Split: $SPLIT"
 cd /storage/DSH/projects/synthetic-contact-matrices
 mkdir -p data/results
 
-export HF_TOKEN="hf_your_new_token_here"
+source .env
 export HF_HOME="/storage/DSH/projects/synthetic-contact-matrices/hf_cache"
 
-python scripts/04_generate.py \
+
+python scripts/04_generate_val.py \
     --adapter_path "models/gemma2-9b-contact-${SPLIT}" \
     --output_file "data/results/generated_contacts_${SPLIT}.jsonl"
