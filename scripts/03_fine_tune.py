@@ -18,13 +18,11 @@ def train_lora(args):
     print(f"Loading tokenizer for {args.model_name}...")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     
-    # Setup padding token and explicitly set right-padding for Causal LM
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
     def preprocess_function(examples):
-        # Because batched=True, examples["messages"] is a list of lists
         texts = [
             tokenizer.apply_chat_template(
                 msg, 
@@ -33,11 +31,10 @@ def train_lora(args):
             ) for msg in examples["messages"]
         ]
         
-        # Tokenize without padding (the collator pads dynamically per batch)
         return tokenizer(
             texts,
             truncation=True,
-            max_length=2048,
+            max_length=8192,  # <--- EXPANDED TO CAPTURE MATRICES
             padding=False
         )
 
@@ -52,7 +49,7 @@ def train_lora(args):
     print(f"Loading base model {args.model_name} in bfloat16...")
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,  # <--- FIXED DEPRECATION WARNING
         device_map="auto"
     )
 
@@ -60,6 +57,7 @@ def train_lora(args):
         r=16,
         lora_alpha=32,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        lora_dropout=0.05,     # <--- ADDED REGULARIZATION
         bias="none",
         task_type="CAUSAL_LM"
     )
@@ -68,15 +66,25 @@ def train_lora(args):
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
 
+    # ------------------------------------------------------------------
+    # DYNAMIC WARMUP CALCULATION 
+    # Bypasses the trl kwargs bug by mathematically finding the 10% mark
+    # ------------------------------------------------------------------
+    num_train_epochs = 3
+    grad_accum_steps = 16
+    total_steps = (len(dataset) // grad_accum_steps) * num_train_epochs
+    dynamic_warmup = max(10, int(total_steps * 0.1))
+    print(f"Calculated optimal warmup steps: {dynamic_warmup} (10% of {total_steps} total steps)")
+
     training_args = TrainingArguments(
         output_dir=args.output_dir,
-        per_device_train_batch_size=1,            # Lowered from 4 to 1
-        gradient_accumulation_steps=16,           # Raised from 4 to 16
-        gradient_checkpointing=True,              # Added this line
+        per_device_train_batch_size=1,            
+        gradient_accumulation_steps=grad_accum_steps,           
+        gradient_checkpointing=True,              
         learning_rate=1e-4,
         lr_scheduler_type="cosine",
-        warmup_steps=50,
-        num_train_epochs=3,
+        warmup_steps=dynamic_warmup, # <--- DYNAMICALLY SET
+        num_train_epochs=num_train_epochs,
         logging_steps=10,
         save_strategy="epoch",
         bf16=True, 
@@ -84,8 +92,7 @@ def train_lora(args):
         report_to="none"
     )
 
-    print("Initializing standard Trainer...")
-    # mlm=False tells the collator to automatically build causal 'labels' padded with -100
+    print("Initializing Standard Trainer...")
     trainer = Trainer(
         model=model,
         train_dataset=dataset,

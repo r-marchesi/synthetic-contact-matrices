@@ -67,8 +67,10 @@ def generate_matrices(args):
             with torch.no_grad():
                 outputs = model.generate(
                     **inputs,
-                    max_new_tokens=dynamic_max_tokens,  # <-- Using your data-driven limit!
-                    temperature=0.1,      
+                    max_new_tokens=dynamic_max_tokens,
+                    temperature=0.6,         # <-- INCREASED from 0.1 to introduce variance
+                    top_p=0.9,               # <-- ADDED Nucleus sampling to prevent bizarre hallucinations
+                    repetition_penalty=1.1,  # <-- mathematically penalizes infinite loops
                     do_sample=True,
                     eos_token_id=stop_token_ids,
                     pad_token_id=tokenizer.eos_token_id,
