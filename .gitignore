@@ -2,6 +2,8 @@
 
 .env
 
+__pycache__/
+
 # Ignore large data and cache folders
 data/
 hf_cache/

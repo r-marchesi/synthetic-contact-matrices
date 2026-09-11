@@ -1,7 +1,7 @@
 import json
 
 def build_demographic_string(demos):
-    """Builds the standard input prompt for the LLM."""
+    """Builds the standard input prompt for the LLM based on participant demographics."""
     return (
         f"Generate the synthetic epidemiological social contacts for a participant "
         f"with the following demographics:\n"
@@ -13,8 +13,8 @@ def build_demographic_string(demos):
 
 def format_conversation(demos, contacts, prompt_style="json_strict"):
     """
-    Routes the data into the requested format (Axis A of the Grid Search).
-    Returns a standard HuggingFace 'messages' array.
+    Routes the data into the requested format for the prompt sweep.
+    Returns a standard ChatML 'messages' array.
     """
     user_content = build_demographic_string(demos)
     
@@ -33,15 +33,33 @@ def format_conversation(demos, contacts, prompt_style="json_strict"):
 
     elif prompt_style == "chain_of_thought":
         # Format 2: Forces the model to reason before outputting JSON
-        reasoning = f"Thought process: The participant is {demos.get('age')} years old. "
-        if int(demos.get('age', 0)) < 18:
-            reasoning += "They are school-aged, so I should generate highly assortative school contacts. "
-        else:
-            reasoning += "They are an adult, so I should balance home, work, and leisure contacts. "
+        age = demos.get('age')
+        try:
+            age_val = float(age)
+            stage = "school-aged, meaning contacts will be highly assortative and concentrated in school settings" if age_val < 18 else "an adult, meaning contacts will likely distribute across work, home, and leisure"
+        except (ValueError, TypeError):
+            stage = "of unknown age"
             
-        reasoning += f"Generating {len(contacts)} contacts based on these traits.\n\n"
+        reasoning = (
+            f"Thought process: The participant is {age} years old. They are {stage}. "
+            f"Based on a household size of {demos.get('hh_size')} and an occupation of {demos.get('occupation')}, "
+            f"I will generate {len(contacts)} contacts to reflect their daily mixing patterns.\n\n"
+        )
         assistant_content = reasoning + json.dumps(contacts)
         
+    elif prompt_style == "natural_language":
+        # Format 3: Unstructured narrative text
+        lines = [f"This participant recorded {len(contacts)} contacts today."]
+        for i, c in enumerate(contacts, 1):
+            lines.append(
+                f"Contact {i} was a {c.get('Contact Age')}-year-old {c.get('Contact Gender')}. "
+                f"They met at {c.get('Contact Setting')} ({c.get('Location of Contact')}). "
+                f"They maintained a {c.get('Distance during Contact')} distance. "
+                f"The relationship is {c.get('Relationship to Participant')} and they meet {c.get('Contact Frequency')}. "
+                f"Physical contact: {c.get('Physical Contact')}."
+            )
+        assistant_content = "\n".join(lines)
+
     else:
         raise ValueError(f"Unknown prompt_style: {prompt_style}")
 
