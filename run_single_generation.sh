@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=gen_rq1
+#SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=10
 #SBATCH --partition=h200
@@ -14,22 +14,37 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=rmarchesi@fbk.eu
 
-SPLIT=$1
+EXP_NAME=$1
 
-if [ -z "$SPLIT" ]; then
-  echo "Error: No split parameter provided."
+if [ -z "$EXP_NAME" ]; then
+  echo "Error: No experiment name provided."
   exit 1
 fi
 
-echo "Starting vLLM Generation for Split: $SPLIT"
+echo "Starting Gemma 2 (9B) Generation Job for Experiment: $EXP_NAME"
 
 cd /storage/DSH/projects/synthetic-contact-matrices
 mkdir -p data/results
+mkdir -p slurm_outputs
 
 source .env
 export HF_HOME="/storage/DSH/projects/synthetic-contact-matrices/hf_cache"
 
+CONFIG_FILE="configs/${EXP_NAME}.json"
 
-python scripts/04_generate_val.py \
-    --adapter_path "models/gemma2-9b-contact-${SPLIT}" \
-    --output_file "data/results/generated_contacts_${SPLIT}.jsonl"
+# Define the target epochs to evaluate
+EPOCHS=(2 4 6 8 10)
+
+for EPOCH in "${EPOCHS[@]}"; do
+    echo "=================================================="
+    echo "Generating matrices for ${EXP_NAME} at Epoch ${EPOCH}"
+    echo "=================================================="
+
+    python scripts/004_generate_val.py \
+        --config "${CONFIG_FILE}" \
+        --target_epoch "${EPOCH}"
+
+    echo "Completed Epoch ${EPOCH} for ${EXP_NAME}."
+done
+
+echo "All requested epochs for ${EXP_NAME} finished."
