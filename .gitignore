@@ -9,3 +9,5 @@ data/
 hf_cache/
 slurm_outputs/
 models/
+checkpoints/
+logs/
