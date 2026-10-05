@@ -2,6 +2,8 @@
 
 .env
 
+*.png
+
 __pycache__/
 
 # Ignore large data and cache folders
@@ -11,3 +13,4 @@ slurm_outputs/
 models/
 checkpoints/
 logs/
+generated/
