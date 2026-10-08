@@ -17,14 +17,115 @@ DATA_DIR = os.path.join(EXP_DIR, "data")
 GEN_DIR = os.path.join(EXP_DIR, "generated")
 OUT_DIR = os.path.join(EXP_DIR, "results")
 
-# Share the exact same parsers from the plotting script
-from evaluate_physics import (
-    load_ground_truth, 
-    parse_dense_semantic, 
-    build_contact_matrix, 
-    get_age_bin
-)
+# --- SHARED PARSERS (Duplicated to keep script standalone) ---
+def get_age_bin(age_str):
+    try:
+        val = float(age_str)
+        return min(14, int(val // 5))
+    except (ValueError, TypeError):
+        return 14
 
+def parse_dense_semantic(df_jsonl):
+    records = []
+    line_parser = re.compile(
+        r"- Setting:\s*(.*?)\s*\|\s*Age:\s*(.*?)\s*\|\s*Gender:\s*(.*?)\s*\|\s*Freq:\s*(.*?)\s*\|\s*Dist:\s*(.*?)(?:\n|$)"
+    )
+    
+    for _, row in df_jsonl.iterrows():
+        part_id = str(row['part_id'])
+        completion = str(row.get('generated_completion', ''))
+        
+        matches = list(line_parser.finditer(completion))
+        
+        if not matches:
+            records.append({
+                "part_id": part_id,
+                "Contact Setting": "Unknown",
+                "Contact Age": "Unknown",
+                "Contact Gender": "Unknown",
+                "Contact Frequency": "Unknown",
+                "Distance during Contact": "Unknown",
+                "valid_contact": False
+            })
+            continue
+            
+        for match in matches:
+            records.append({
+                "part_id": part_id,
+                "Contact Setting": match.group(1).strip(),
+                "Contact Age": match.group(2).strip(),
+                "Contact Gender": match.group(3).strip(),
+                "Contact Frequency": match.group(4).strip(),
+                "Distance during Contact": match.group(5).strip(),
+                "valid_contact": True
+            })
+            
+    return pd.DataFrame(records)
+
+def load_ground_truth(master_csv, val_ids_csv):
+    val_ids_df = pd.read_csv(val_ids_csv)
+    val_ids_set = set(val_ids_df['part_id'].astype(str))
+    
+    master_df = pd.read_csv(master_csv, low_memory=False)
+    master_df['part_id'] = master_df['part_id'].astype(str)
+    gt_df = master_df[master_df['part_id'].isin(val_ids_set)].copy()
+    
+    demos_df = gt_df.drop_duplicates(subset=['part_id'])[['part_id', 'part_age_exact', 'hh_size', 'part_gender']]
+    demos_df['part_age_exact'] = pd.to_numeric(demos_df['part_age_exact'], errors='coerce')
+    demos_df['hh_size'] = pd.to_numeric(demos_df['hh_size'], errors='coerce').fillna(1)
+    
+    valid_contacts = gt_df[gt_df['cont_id'].notna()].copy()
+    
+    contact_map = {
+        'cnt_age_exact': 'Contact Age',
+        'cnt_gender': 'Contact Gender',
+        'frequency_multi': 'Contact Frequency',
+        'distance': 'Distance during Contact',
+        'setting': 'Contact Setting'
+    }
+    
+    keep_cols = ['part_id']
+    for raw_col, clean_col in contact_map.items():
+        if raw_col in valid_contacts.columns:
+            valid_contacts[clean_col] = valid_contacts[raw_col]
+            keep_cols.append(clean_col)
+            
+    valid_contacts = valid_contacts[keep_cols]
+    valid_contacts['valid_contact'] = True
+    
+    return valid_contacts, demos_df, val_ids_set
+
+def build_contact_matrix(df, val_part_dict, age_col):
+    matrix = np.zeros((15, 15))
+    if df.empty:
+        return matrix
+        
+    df = df.copy()
+    part_bin_counts = {i: 0 for i in range(15)}
+    for _, part_age in val_part_dict.items():
+        part_bin_counts[part_age] += 1
+        
+    df = df[df[age_col].notna() & (df[age_col] != 'Unknown') & (df[age_col] != '')]
+    
+    for _, row in df.iterrows():
+        if not row.get('valid_contact', True):
+            continue
+            
+        p_id = str(row['part_id'])
+        if p_id not in val_part_dict:
+            continue
+            
+        p_bin = val_part_dict[p_id]
+        c_bin = get_age_bin(row[age_col])
+        matrix[p_bin, c_bin] += 1
+        
+    for p_bin in range(15):
+        if part_bin_counts[p_bin] > 0:
+            matrix[p_bin, :] /= part_bin_counts[p_bin]
+            
+    return matrix
+
+# --- CORE METRICS CALCULATION ---
 def calculate_reciprocity_error(matrix):
     """
     Calculates the Mean Absolute Error between the upper and lower triangles 
@@ -49,7 +150,6 @@ def calculate_c2st(gt_contacts, gen_contacts):
     Trains an XGBoost classifier to distinguish GT from Generated data.
     Returns the ROC-AUC score.
     """
-    # 1. Standardize columns
     features = [
         'Contact Setting', 'Contact Age', 'Contact Gender', 
         'Contact Frequency', 'Distance during Contact'
@@ -58,37 +158,38 @@ def calculate_c2st(gt_contacts, gen_contacts):
     gt = gt_contacts[features].copy()
     gen = gen_contacts[features].copy()
     
-    # 2. Add Target Label (1 for Generated, 0 for Real)
     gt['is_synthetic'] = 0
     gen['is_synthetic'] = 1
     
     combined = pd.concat([gt, gen], ignore_index=True)
-    combined = combined.replace('Unknown', np.nan)
     
-    # 3. Encode Categorical Variables
-    le = LabelEncoder()
-    for col in features:
-        combined[col] = combined[col].astype(str)
+    # FIX 1: Force Age to be purely numeric so '34.0' and '34' evaluate identically
+    combined['Contact Age'] = pd.to_numeric(combined['Contact Age'], errors='coerce')
+    
+    # FIX 2: Normalize strings (lowercase, strip) to prevent trivial whitespace splits
+    cat_cols = ['Contact Setting', 'Contact Gender', 'Contact Frequency', 'Distance during Contact']
+    for col in cat_cols:
+        combined[col] = combined[col].astype(str).str.strip().str.lower()
+        # Unify all missing value representations
+        combined[col] = combined[col].replace(['nan', '<na>', 'none', ''], 'unknown')
+        
+        le = LabelEncoder()
         combined[col] = le.fit_transform(combined[col])
         
     X = combined[features]
     y = combined['is_synthetic']
     
-    # 4. Train/Test Split
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
     
-    # 5. Train XGBoost
     clf = xgb.XGBClassifier(
         n_estimators=100, 
         max_depth=4,
         learning_rate=0.1,
         eval_metric='auc',
-        use_label_encoder=False,
         random_state=42
     )
     clf.fit(X_train, y_train)
     
-    # 6. Evaluate
     y_pred_proba = clf.predict_proba(X_test)[:, 1]
     auc = roc_auc_score(y_test, y_pred_proba)
     
@@ -149,7 +250,6 @@ def run_evaluation(master_csv, val_ids_csv):
             "Valid_Syntax_Pct": valid_pct
         })
 
-    # Save and summarize
     results_df = pd.DataFrame(results).sort_values("Epoch")
     out_csv = os.path.join(OUT_DIR, "evaluation_metrics.csv")
     results_df.to_csv(out_csv, index=False)
