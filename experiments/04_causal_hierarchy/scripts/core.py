@@ -3,32 +3,8 @@ import math
 import pandas as pd
 from collections import Counter
 
-SETTING_ORDER = ["Home", "Work", "School", "Other"]
-
-# All 9 participant conditioning columns from 001_create_master_data.py
-PARTICIPANT_RAW_COLS = [
-    "part_age_exact",
-    "part_gender",
-    "hh_size",
-    "presence_work",
-    "presence_school",
-    "occupation",
-    "educational_attainment",
-    "household_monthly_net_income",
-    "region_nuts1",
-]
-
-# All 8 contact target columns in causal generation order
-CONTACT_RAW_TO_CLEAN = [
-    ("setting", "Contact Setting"),
-    ("location_multi", "Location of Contact"),
-    ("relationship", "Relationship to Participant"),
-    ("cnt_age_exact", "Contact Age"),
-    ("cnt_gender", "Contact Gender"),
-    ("frequency_multi", "Contact Frequency"),
-    ("phys_contact", "Physical Contact"),
-    ("distance", "Distance during Contact"),
-]
+# The 6 exact MixIT social locations from 'location_multi'
+LOCATION_ORDER = ["Home", "Work", "School", "Leisure", "Transport", "Other"]
 
 
 def clean_val(val, is_int=False):
@@ -46,27 +22,25 @@ def clean_val(val, is_int=False):
             return str(max(0, int(round(f))))
         except (ValueError, TypeError):
             return "Unknown"
-    # Strip trailing .0 from numeric-coded categories
     if s.endswith(".0") and s[:-2].lstrip("-").isdigit():
         s = s[:-2]
-    # Replace pipe characters so they never break the DSL delimiter
     return s.replace("|", "/").replace("\n", " ").strip()
 
 
-def normalize_setting(val):
-    """Maps raw setting strings to the 4 canonical setting buckets."""
+def normalize_location(val):
+    """Maps raw location_multi values to the 6 canonical MixIT locations."""
     s = clean_val(val)
     if s == "Unknown":
         return "Other"
     s_lower = s.lower()
-    for canonical in SETTING_ORDER:
-        if canonical.lower() in s_lower:
-            return canonical
+    for loc in LOCATION_ORDER:
+        if loc.lower() == s_lower or loc.lower() in s_lower:
+            return loc
     return "Other"
 
 
 def compute_age_gap(part_age_str, cont_age_str):
-    """Derives the generational relationship token bridging Participant Age -> Contact Age."""
+    """Derives the generational bridge token between Participant Age and Contact Age."""
     try:
         p_age = int(float(part_age_str))
         c_age = int(float(cont_age_str))
@@ -82,7 +56,6 @@ def compute_age_gap(part_age_str, cont_age_str):
 
 
 def extract_participant_demos(first_row):
-    """Extracts and cleans all 9 conditioning variables from a participant's group."""
     return {
         "part_id": str(first_row["part_id"]).strip(),
         "age": clean_val(first_row.get("part_age_exact"), is_int=True),
@@ -98,7 +71,6 @@ def extract_participant_demos(first_row):
 
 
 def build_prompt(demos):
-    """Formats the [PARTICIPANT] conditioning prompt."""
     return (
         "Generate the daily epidemiological contact diary for the following participant:\n"
         "[PARTICIPANT]\n"
@@ -111,8 +83,9 @@ def build_prompt(demos):
 
 def format_causal_completion(demos, part_df):
     """
-    Serializes a participant's contacts into the [PLAN] + [CONTACTS] Causal Social-Circle DSL.
-    Orders contacts deterministically by Setting -> Relationship -> Age.
+    Serializes a participant's contacts into [PLAN] + [CONTACTS].
+    - [PLAN] decomposes total volume across the 6 MixIT locations (location_multi).
+    - [CONTACTS] orders fields causally: Location -> Setting (indoor/outdoor) -> Relation -> Age_Gap -> Age...
     """
     contact_rows = part_df[
         part_df["cont_id"].notna()
@@ -121,8 +94,8 @@ def format_causal_completion(demos, part_df):
 
     contacts = []
     for _, row in contact_rows.iterrows():
-        c_setting = normalize_setting(row.get("setting"))
-        c_loc = clean_val(row.get("location_multi"))
+        c_loc = normalize_location(row.get("location_multi"))
+        c_setting = clean_val(row.get("setting"))  # 'indoor' / 'outdoor' / 'Unknown'
         c_rel = clean_val(row.get("relationship"))
         c_age = clean_val(row.get("cnt_age_exact"), is_int=True)
         c_age_gap = compute_age_gap(demos["age"], c_age)
@@ -137,8 +110,8 @@ def format_causal_completion(demos, part_df):
             age_sort_key = 999
 
         contacts.append({
-            "setting": c_setting,
             "loc": c_loc,
+            "setting": c_setting,
             "rel": c_rel,
             "age_gap": c_age_gap,
             "age": c_age,
@@ -147,7 +120,7 @@ def format_causal_completion(demos, part_df):
             "phys": c_phys,
             "dist": c_dist,
             "_sort_key": (
-                SETTING_ORDER.index(c_setting) if c_setting in SETTING_ORDER else 99,
+                LOCATION_ORDER.index(c_loc) if c_loc in LOCATION_ORDER else 99,
                 c_rel,
                 age_sort_key,
             ),
@@ -155,11 +128,12 @@ def format_causal_completion(demos, part_df):
 
     contacts.sort(key=lambda x: x["_sort_key"])
 
-    counts = Counter(c["setting"] for c in contacts)
+    counts = Counter(c["loc"] for c in contacts)
     plan_header = (
         f"[PLAN]\n"
         f"Total: {len(contacts)} | Home: {counts['Home']} | Work: {counts['Work']} | "
-        f"School: {counts['School']} | Other: {counts['Other']}"
+        f"School: {counts['School']} | Leisure: {counts['Leisure']} | "
+        f"Transport: {counts['Transport']} | Other: {counts['Other']}"
     )
 
     if not contacts:
@@ -168,7 +142,7 @@ def format_causal_completion(demos, part_df):
         lines = []
         for c in contacts:
             lines.append(
-                f"- Setting: {c['setting']} | Location: {c['loc']} | Relation: {c['rel']} | "
+                f"- Location: {c['loc']} | Setting: {c['setting']} | Relation: {c['rel']} | "
                 f"Age_Gap: {c['age_gap']} | Age: {c['age']} | Gender: {c['gender']} | "
                 f"Freq: {c['freq']} | Phys: {c['phys']} | Dist: {c['dist']}"
             )
@@ -178,32 +152,28 @@ def format_causal_completion(demos, part_df):
 
 
 PLAN_REGEX = re.compile(
-    r"Total:\s*(\d+)\s*\|\s*Home:\s*(\d+)\s*\|\s*Work:\s*(\d+)\s*\|\s*School:\s*(\d+)\s*\|\s*Other:\s*(\d+)",
+    r"Total:\s*(\d+)\s*\|\s*Home:\s*(\d+)\s*\|\s*Work:\s*(\d+)\s*\|\s*School:\s*(\d+)\s*\|\s*"
+    r"Leisure:\s*(\d+)\s*\|\s*Transport:\s*(\d+)\s*\|\s*Other:\s*(\d+)",
     re.IGNORECASE,
 )
 
 CONTACT_LINE_REGEX = re.compile(
-    r"-\s*Setting:\s*(.*?)\s*\|\s*Location:\s*(.*?)\s*\|\s*Relation:\s*(.*?)\s*\|\s*"
+    r"-\s*Location:\s*(.*?)\s*\|\s*Setting:\s*(.*?)\s*\|\s*Relation:\s*(.*?)\s*\|\s*"
     r"Age_Gap:\s*(.*?)\s*\|\s*Age:\s*(.*?)\s*\|\s*Gender:\s*(.*?)\s*\|\s*"
     r"Freq:\s*(.*?)\s*\|\s*Phys:\s*(.*?)\s*\|\s*Dist:\s*(.*?)(?:\r?\n|$)"
 )
 
 
 def parse_causal_completion(part_id, completion_text):
-    """
-    Parses a generated or ground-truth Causal DSL completion.
-    Distinguishes valid 0-contact diaries ('- None') from malformed outputs.
-    """
     text = str(completion_text or "").strip()
     plan_match = PLAN_REGEX.search(text)
     declared_total = int(plan_match.group(1)) if plan_match else None
 
-    # Case 1: Explicit 0-contact diary
     if re.search(r"\[CONTACTS\]\s*-\s*None", text, re.IGNORECASE) or declared_total == 0:
         return [{
             "part_id": str(part_id),
-            "Contact Setting": "None",
             "Location of Contact": "None",
+            "Contact Setting": "None",
             "Relationship to Participant": "None",
             "Age_Gap": "None",
             "Contact Age": "None",
@@ -216,13 +186,12 @@ def parse_causal_completion(part_id, completion_text):
             "declared_total": 0 if declared_total is None else declared_total,
         }]
 
-    # Case 2: Extract contact lines
     matches = list(CONTACT_LINE_REGEX.finditer(text))
     if not matches:
         return [{
             "part_id": str(part_id),
-            "Contact Setting": "Unknown",
             "Location of Contact": "Unknown",
+            "Contact Setting": "Unknown",
             "Relationship to Participant": "Unknown",
             "Age_Gap": "Unknown",
             "Contact Age": "Unknown",
@@ -239,8 +208,8 @@ def parse_causal_completion(part_id, completion_text):
     for m in matches:
         rows.append({
             "part_id": str(part_id),
-            "Contact Setting": normalize_setting(m.group(1)),
-            "Location of Contact": clean_val(m.group(2)),
+            "Location of Contact": normalize_location(m.group(1)),
+            "Contact Setting": clean_val(m.group(2)),
             "Relationship to Participant": clean_val(m.group(3)),
             "Age_Gap": clean_val(m.group(4)),
             "Contact Age": clean_val(m.group(5), is_int=True),

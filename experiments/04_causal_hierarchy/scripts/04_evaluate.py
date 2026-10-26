@@ -1,7 +1,6 @@
 import os
 import sys
 import glob
-import re
 import argparse
 import numpy as np
 import pandas as pd
@@ -40,6 +39,15 @@ CONTACT_FEATURES = [
     "Distance during Contact",
 ]
 
+# Exact 5 contact features used in old Exp 02 (05_evaluate_metrics.py)
+MARGINAL_C2ST_FEATURES = [
+    "Location of Contact",
+    "Contact Age",
+    "Contact Gender",
+    "Contact Frequency",
+    "Distance during Contact",
+]
+
 DEMO_FEATURES = [
     "age", "gender", "hh_size", "work_today", "school_today",
     "occupation", "education", "income", "region",
@@ -47,7 +55,6 @@ DEMO_FEATURES = [
 
 
 def get_age_bin(age_str):
-    """Maps valid numeric ages to 0..14; returns None for unparseable/Unknown ages."""
     try:
         val = float(age_str)
         if np.isnan(val) or val < 0:
@@ -58,7 +65,6 @@ def get_age_bin(age_str):
 
 
 def parse_jsonl_records(df_jsonl, col_name):
-    """Parses completion strings into a flat DataFrame of contacts + participant flags."""
     all_rows = []
     for _, row in df_jsonl.iterrows():
         pid = str(row["part_id"]).strip()
@@ -68,8 +74,11 @@ def parse_jsonl_records(df_jsonl, col_name):
     return pd.DataFrame(all_rows)
 
 
-def build_contact_matrix(parsed_df, val_part_bins, setting_filter=None):
-    """Builds a 15x15 contact matrix C_ij normalized by participant bin counts."""
+def build_contact_matrix(parsed_df, val_part_bins, location_filter=None):
+    """
+    Builds a 15x15 contact matrix C_ij normalized by participant bin counts.
+    Filters by 'Location of Contact' (where MixIT stores Home, Work, School, Leisure).
+    """
     matrix = np.zeros((15, 15))
     part_bin_counts = {i: 0 for i in range(15)}
     for p_bin in val_part_bins.values():
@@ -80,8 +89,14 @@ def build_contact_matrix(parsed_df, val_part_bins, setting_filter=None):
         (parsed_df["valid_syntax"] == True) & (parsed_df["is_zero_contact"] == False)
     ].copy()
 
-    if setting_filter:
-        contacts_only = contacts_only[contacts_only["Contact Setting"] == setting_filter]
+    if location_filter:
+        # Match against Location of Contact (with fallback to Contact Setting)
+        loc_mask = contacts_only["Location of Contact"].astype(str).str.contains(
+            location_filter, case=False, na=False
+        ) | contacts_only["Contact Setting"].astype(str).str.contains(
+            location_filter, case=False, na=False
+        )
+        contacts_only = contacts_only[loc_mask]
 
     for _, row in contacts_only.iterrows():
         pid = str(row["part_id"])
@@ -98,7 +113,6 @@ def build_contact_matrix(parsed_df, val_part_bins, setting_filter=None):
 
 
 def calc_spectral_radius_ratio(gt_mat, gen_mat):
-    """Ratio of dominant eigenvalues rho(C_gen) / rho(C_gt), a proxy for R0 fidelity."""
     rho_gt = np.max(np.abs(np.linalg.eigvals(gt_mat)))
     rho_gen = np.max(np.abs(np.linalg.eigvals(gen_mat)))
     if rho_gt == 0:
@@ -107,13 +121,11 @@ def calc_spectral_radius_ratio(gt_mat, gen_mat):
 
 
 def calc_weighted_reciprocity(matrix, N_vector):
-    """Population-weighted reciprocity error: mean(|C_ij * N_i - C_ji * N_j|)."""
     pop_matrix = matrix * N_vector[:, None]
     return float(np.mean(np.abs(pop_matrix - pop_matrix.T)))
 
 
 def get_volume_array(parsed_df, eval_part_ids):
-    """Returns array of valid contact counts per participant."""
     valid_contacts = parsed_df[
         (parsed_df["valid_syntax"] == True) & (parsed_df["is_zero_contact"] == False)
     ]
@@ -122,7 +134,6 @@ def get_volume_array(parsed_df, eval_part_ids):
 
 
 def calc_tvd(gt_vols, gen_vols, max_cap=50):
-    """Total Variation Distance between discrete contact volume distributions."""
     bins = np.arange(max_cap + 2)
     p_gt, _ = np.histogram(np.clip(gt_vols, 0, max_cap), bins=bins, density=True)
     p_gen, _ = np.histogram(np.clip(gen_vols, 0, max_cap), bins=bins, density=True)
@@ -130,7 +141,6 @@ def calc_tvd(gt_vols, gen_vols, max_cap=50):
 
 
 def cramers_v(x, y):
-    """Bias-corrected Cramér's V between two categorical/binned series."""
     confusion = pd.crosstab(x, y)
     if confusion.shape[0] < 2 or confusion.shape[1] < 2:
         return 0.0
@@ -150,7 +160,6 @@ def cramers_v(x, y):
 
 
 def compute_correlation_delta(gt_joint, gen_joint, cols, plot_path=None):
-    """Computes pairwise Cramér's V matrices for GT vs Gen and returns Mean Absolute Error."""
     def prep_for_corr(df):
         d = df[cols].copy()
         for col in ["age", "Contact Age"]:
@@ -193,29 +202,27 @@ def compute_correlation_delta(gt_joint, gen_joint, cols, plot_path=None):
     return corr_mae
 
 
-def evaluate_joint_c2st(gt_joint, gen_joint, feature_cols):
+def evaluate_c2st(gt_df, gen_df, feature_cols):
     """
-    Trains an out-of-fold XGBoost classifier on Joint (Participant + Contact + Volume) features
-    grouped by part_id. Returns ROC-AUC and Top-5 most discriminative features.
+    Runs 5-fold StratifiedGroupKFold XGBoost C2ST on the requested feature_cols.
+    Returns (ROC_AUC, top_5_feature_importance_string).
     """
-    gt = gt_joint[feature_cols + ["part_id"]].copy()
-    gen = gen_joint[feature_cols + ["part_id"]].copy()
+    gt = gt_df[feature_cols + ["part_id"]].copy()
+    gen = gen_df[feature_cols + ["part_id"]].copy()
     gt["is_synthetic"] = 0
     gen["is_synthetic"] = 1
 
-    # Prefix group IDs so GT and Gen for the same part_id can be grouped together
     combined = pd.concat([gt, gen], ignore_index=True)
     groups = combined["part_id"].astype(str)
 
     X = combined[feature_cols].copy()
     y = combined["is_synthetic"].values
 
-    num_cols = ["age", "hh_size", "Contact Age", "part_volume"]
+    num_cols = [c for c in ["age", "hh_size", "Contact Age", "part_volume"] if c in feature_cols]
     cat_cols = [c for c in feature_cols if c not in num_cols]
 
     for nc in num_cols:
-        if nc in X.columns:
-            X[nc] = pd.to_numeric(X[nc], errors="coerce").fillna(-1.0)
+        X[nc] = pd.to_numeric(X[nc], errors="coerce").fillna(-1.0)
 
     if cat_cols:
         X[cat_cols] = X[cat_cols].astype(str).apply(lambda s: s.str.strip().str.lower())
@@ -313,7 +320,6 @@ def run_evaluation(args):
         gt_sub = gt_parsed_all[gt_parsed_all["part_id"].isin(eval_pids)].copy()
         gen_sub = parse_jsonl_records(gen_jsonl, col_name="generated_completion")
 
-        # Participant age bins & population vector
         sub_demos = demos_df[demos_df["part_id"].isin(eval_pids)].copy()
         val_part_bins = {
             row["part_id"]: get_age_bin(row["age"]) for _, row in sub_demos.iterrows()
@@ -323,31 +329,31 @@ def run_evaluation(args):
             if b is not None:
                 N_vec[b] += 1
 
-        # 1. Syntax & Plan Validity (at participant level)
         part_syntax = gen_sub.groupby("part_id")["valid_syntax"].all()
         valid_syntax_pct = float(part_syntax.mean() * 100.0)
 
-        # 2. Matrices & Reciprocity
+        # Matrices (Total, Home, Work, School) filtered via Location of Contact
         gt_mat_tot = build_contact_matrix(gt_sub, val_part_bins)
         gen_mat_tot = build_contact_matrix(gen_sub, val_part_bins)
         gt_mat_home = build_contact_matrix(gt_sub, val_part_bins, "Home")
         gen_mat_home = build_contact_matrix(gen_sub, val_part_bins, "Home")
         gt_mat_work = build_contact_matrix(gt_sub, val_part_bins, "Work")
         gen_mat_work = build_contact_matrix(gen_sub, val_part_bins, "Work")
+        gt_mat_school = build_contact_matrix(gt_sub, val_part_bins, "School")
+        gen_mat_school = build_contact_matrix(gen_sub, val_part_bins, "School")
 
         mae_tot = float(np.mean(np.abs(gt_mat_tot - gen_mat_tot)))
         mae_home = float(np.mean(np.abs(gt_mat_home - gen_mat_home)))
         mae_work = float(np.mean(np.abs(gt_mat_work - gen_mat_work)))
+        mae_school = float(np.mean(np.abs(gt_mat_school - gen_mat_school)))
         r0_ratio = calc_spectral_radius_ratio(gt_mat_tot, gen_mat_tot)
         recip_err = calc_weighted_reciprocity(gen_mat_tot, N_vec)
 
-        # 3. Volumes
         gt_vols = get_volume_array(gt_sub, eval_pids)
         gen_vols = get_volume_array(gen_sub, eval_pids)
         vol_tvd = calc_tvd(gt_vols, gen_vols)
         vol_wass = float(wasserstein_distance(gt_vols, gen_vols))
 
-        # 4. Joint DataFrames for Correlation & C2ST
         gt_vol_map = dict(zip(eval_pids, gt_vols))
         gen_vol_map = dict(zip(eval_pids, gen_vols))
 
@@ -369,19 +375,21 @@ def run_evaluation(args):
                 gt_joint, gen_joint, corr_cols,
                 plot_path=os.path.join(plot_dir, "correlation_cramers_v.png"),
             )
-            c2st_auc, top_leaks = evaluate_joint_c2st(gt_joint, gen_joint, joint_cols)
+            marginal_c2st_auc, _ = evaluate_c2st(gt_joint, gen_joint, MARGINAL_C2ST_FEATURES)
+            joint_c2st_auc, top_leaks = evaluate_c2st(gt_joint, gen_joint, joint_cols)
         else:
-            corr_mae, c2st_auc, top_leaks = np.nan, np.nan, "Insufficient contacts"
+            corr_mae, marginal_c2st_auc, joint_c2st_auc, top_leaks = np.nan, np.nan, np.nan, "Insufficient contacts"
 
-        plot_matrix_comparison(gt_mat_tot, gen_mat_tot, tag, os.path.join(plot_dir, "matrix_total.png"))
+        plot_matrix_comparison(gt_mat_tot, gen_mat_tot, f"{tag} (Total)", os.path.join(plot_dir, "matrix_total.png"))
+        plot_matrix_comparison(gt_mat_home, gen_mat_home, f"{tag} (Home)", os.path.join(plot_dir, "matrix_home.png"))
+        plot_matrix_comparison(gt_mat_work, gen_mat_work, f"{tag} (Work)", os.path.join(plot_dir, "matrix_work.png"))
         plot_volume_comparison(gt_vols, gen_vols, tag, os.path.join(plot_dir, "volume_distribution.png"))
 
         print(f"  -> Valid Syntax: {valid_syntax_pct:.1f}%")
-        print(f"  -> Matrix MAE (Total): {mae_tot:.4f} | R0 Ratio: {r0_ratio:.3f}")
-        print(f"  -> Volume TVD: {vol_tvd:.4f} | Mean Vol (GT vs Gen): {gt_vols.mean():.2f} vs {gen_vols.mean():.2f}")
-        print(f"  -> Pairwise Correlation MAE (Cramér's V): {corr_mae:.4f}")
-        print(f"  -> Joint C2ST AUC: {c2st_auc:.4f} (0.50 = indistinguishable)")
-        print(f"  -> Top C2ST Discriminators: {top_leaks}")
+        print(f"  -> Matrix MAE | Total: {mae_tot:.4f} | Home: {mae_home:.4f} | Work: {mae_work:.4f} | School: {mae_school:.4f}")
+        print(f"  -> R0 Ratio: {r0_ratio:.3f} | Volume TVD: {vol_tvd:.4f} | Corr MAE: {corr_mae:.4f}")
+        print(f"  -> Marginal C2ST AUC (5-col): {marginal_c2st_auc:.4f} | Joint C2ST AUC (19-col): {joint_c2st_auc:.4f}")
+        print(f"  -> Top Joint C2ST Drivers: {top_leaks}")
 
         summary_rows.append({
             "Run": tag,
@@ -389,6 +397,7 @@ def run_evaluation(args):
             "MAE_Total": mae_tot,
             "MAE_Home": mae_home,
             "MAE_Work": mae_work,
+            "MAE_School": mae_school,
             "R0_Ratio": r0_ratio,
             "Reciprocity_Err": recip_err,
             "Volume_TVD": vol_tvd,
@@ -396,7 +405,8 @@ def run_evaluation(args):
             "Mean_Vol_GT": float(gt_vols.mean()),
             "Mean_Vol_Gen": float(gen_vols.mean()),
             "Corr_MAE": corr_mae,
-            "Joint_C2ST_AUC": c2st_auc,
+            "Marginal_C2ST_AUC": marginal_c2st_auc,
+            "Joint_C2ST_AUC": joint_c2st_auc,
             "Top_5_C2ST_Drivers": top_leaks,
         })
 
@@ -405,11 +415,11 @@ def run_evaluation(args):
     leaderboard.to_csv(out_csv, index=False)
 
     print("\n================================================================================")
-    print("🏆 EXPERIMENT 04 LEADERBOARD")
+    print("🏆 EXPERIMENT 04 LEADERBOARD (WITH HOME/WORK/SCHOOL & MARGINAL/JOINT C2ST)")
     print("================================================================================")
     display_cols = [c for c in leaderboard.columns if c != "Top_5_C2ST_Drivers"]
     print(leaderboard[display_cols].to_string(index=False, float_format="%.4f"))
-    print(f"\nFull leaderboard (including Top-5 C2ST feature drivers) saved to: {out_csv}")
+    print(f"\nSaved to: {out_csv}")
 
 
 if __name__ == "__main__":

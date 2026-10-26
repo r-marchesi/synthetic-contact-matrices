@@ -15,15 +15,15 @@ DATA_DIR = os.path.join(EXP_DIR, "data")
 CHKPT_DIR = os.path.join(EXP_DIR, "checkpoints")
 OUT_DIR = os.path.join(EXP_DIR, "generated")
 
-SETTING_ORDER = ["Home", "Work", "School", "Other"]
+LOCATION_ORDER = ["Home", "Work", "School", "Leisure", "Transport", "Other"]
 PLAN_PARSE_RE = re.compile(
-    r"Home:\s*(\d+)\s*\|\s*Work:\s*(\d+)\s*\|\s*School:\s*(\d+)\s*\|\s*Other:\s*(\d+)",
+    r"Home:\s*(\d+)\s*\|\s*Work:\s*(\d+)\s*\|\s*School:\s*(\d+)\s*\|\s*"
+    r"Leisure:\s*(\d+)\s*\|\s*Transport:\s*(\d+)\s*\|\s*Other:\s*(\d+)",
     re.IGNORECASE,
 )
 
 
 def find_checkpoint_for_epoch(adapter_base, target_epoch):
-    """Finds the exact checkpoint folder matching target_epoch via trainer_state.json."""
     if str(target_epoch).lower() == "final":
         final_dir = os.path.join(adapter_base, "final_adapter")
         return final_dir if os.path.exists(final_dir) else None
@@ -38,7 +38,6 @@ def find_checkpoint_for_epoch(adapter_base, target_epoch):
                 if round(state.get("epoch", 0)) == target_epoch_int:
                     return ckpt
 
-    # Fallback to final_adapter if exact epoch not found
     fallback = os.path.join(adapter_base, "final_adapter")
     if os.path.exists(fallback):
         print(f"Warning: Epoch {target_epoch} not found. Falling back to {fallback}")
@@ -67,7 +66,6 @@ def load_model_and_tokenizer(base_model_id, lora_path):
 
 
 def get_newline_token_ids(tokenizer):
-    """Collects token IDs corresponding to newline characters for single-line stopping."""
     stop_ids = {tokenizer.eos_token_id}
     if "<end_of_turn>" in tokenizer.vocab:
         stop_ids.add(tokenizer.vocab["<end_of_turn>"])
@@ -78,46 +76,44 @@ def get_newline_token_ids(tokenizer):
     return list(stop_ids)
 
 
-def parse_planned_schedule(plan_text, max_contacts=35):
+def parse_planned_schedule(plan_text, max_contacts=50):
     """
-    Extracts (Home, Work, School, Other) counts from the generated [PLAN] line
-    and returns a canonical list of settings to generate, e.g. ['Home', 'Home', 'Work'].
+    Extracts (Home, Work, School, Leisure, Transport, Other) counts from [PLAN]
+    and returns the exact list of locations to generate in Phase 2.
     """
     m = PLAN_PARSE_RE.search(plan_text)
     if not m:
-        return [], "[PLAN]\nTotal: 0 | Home: 0 | Work: 0 | School: 0 | Other: 0"
+        return [], (
+            "[PLAN]\nTotal: 0 | Home: 0 | Work: 0 | School: 0 | "
+            "Leisure: 0 | Transport: 0 | Other: 0"
+        )
 
     counts = {
-        "Home": min(15, int(m.group(1))),
-        "Work": min(25, int(m.group(2))),
-        "School": min(25, int(m.group(3))),
-        "Other": min(20, int(m.group(4))),
+        "Home": int(m.group(1)),
+        "Work": int(m.group(2)),
+        "School": int(m.group(3)),
+        "Leisure": int(m.group(4)),
+        "Transport": int(m.group(5)),
+        "Other": int(m.group(6)),
     }
     schedule = []
-    for s in SETTING_ORDER:
-        schedule.extend([s] * counts[s])
+    for loc in LOCATION_ORDER:
+        schedule.extend([loc] * counts[loc])
 
-    # Cap total contacts at max_contacts while preserving setting order
     schedule = schedule[:max_contacts]
-    reconciled_counts = {s: schedule.count(s) for s in SETTING_ORDER}
+    reconciled = {loc: schedule.count(loc) for loc in LOCATION_ORDER}
     total = len(schedule)
 
     clean_plan_header = (
         f"[PLAN]\n"
-        f"Total: {total} | Home: {reconciled_counts['Home']} | "
-        f"Work: {reconciled_counts['Work']} | School: {reconciled_counts['School']} | "
-        f"Other: {reconciled_counts['Other']}"
+        f"Total: {total} | Home: {reconciled['Home']} | Work: {reconciled['Work']} | "
+        f"School: {reconciled['School']} | Leisure: {reconciled['Leisure']} | "
+        f"Transport: {reconciled['Transport']} | Other: {reconciled['Other']}"
     )
     return schedule, clean_plan_header
 
 
 def generate_batch_plan_guided(model, tokenizer, batch_prompts, args, line_stop_ids):
-    """
-    Two-phase generation:
-      Phase 1: Sample the [PLAN] line for all participants in the batch.
-      Phase 2: Step-by-step prefix-force '- Setting: <S> | Location:' for each planned contact.
-    """
-    # Phase 1: Format ChatML prompt + '[PLAN]\nTotal:' prefix
     chat_prefixes = [
         tokenizer.apply_chat_template(
             [{"role": "user", "content": p}],
@@ -132,7 +128,7 @@ def generate_batch_plan_guided(model, tokenizer, batch_prompts, args, line_stop_
     with torch.no_grad():
         plan_outputs = model.generate(
             **inputs,
-            max_new_tokens=36,
+            max_new_tokens=48,
             do_sample=True,
             temperature=args.temperature,
             min_p=args.min_p,
@@ -155,8 +151,8 @@ def generate_batch_plan_guided(model, tokenizer, batch_prompts, args, line_stop_
 
     in_lens = [len(x) for x in inputs.input_ids]
     for i, out_seq in enumerate(plan_outputs):
-        gen_Part = tokenizer.decode(out_seq[in_lens[i]:], skip_special_tokens=True).split("\n")[0]
-        raw_plan_line = "Total:" + gen_Part
+        gen_part = tokenizer.decode(out_seq[in_lens[i]:], skip_special_tokens=True).split("\n")[0]
+        raw_plan_line = "Total:" + gen_part
         sched, clean_header = parse_planned_schedule(raw_plan_line, max_contacts=args.max_contacts)
         schedules.append(sched)
         if len(sched) == 0:
@@ -164,7 +160,6 @@ def generate_batch_plan_guided(model, tokenizer, batch_prompts, args, line_stop_
         else:
             running_completions.append(f"{clean_header}\n[CONTACTS]")
 
-    # Phase 2: Iteratively generate contact lines for active participants in the batch
     max_steps = max((len(s) for s in schedules), default=0)
     for step_idx in range(max_steps):
         active_indices = [i for i, s in enumerate(schedules) if step_idx < len(s)]
@@ -173,8 +168,8 @@ def generate_batch_plan_guided(model, tokenizer, batch_prompts, args, line_stop_
 
         step_prompts = []
         for idx in active_indices:
-            setting_name = schedules[idx][step_idx]
-            forced_line_prefix = f"\n- Setting: {setting_name} | Location:"
+            loc_name = schedules[idx][step_idx]
+            forced_line_prefix = f"\n- Location: {loc_name} | Setting:"
             running_completions[idx] += forced_line_prefix
             step_prompts.append(base_chat_prompts[idx] + running_completions[idx])
 
@@ -203,7 +198,6 @@ def generate_batch_plan_guided(model, tokenizer, batch_prompts, args, line_stop_
 
 
 def generate_batch_full_free(model, tokenizer, batch_prompts, args):
-    """Single-pass unconstrained generation with calibrated sampling and full ChatML template."""
     chat_prompts = [
         tokenizer.apply_chat_template(
             [{"role": "user", "content": p}],
@@ -296,7 +290,7 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.95)
     parser.add_argument("--min_p", type=float, default=0.03)
     parser.add_argument("--top_p", type=float, default=0.98)
-    parser.add_argument("--max_contacts", type=int, default=35)
+    parser.add_argument("--max_contacts", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--samples", type=int, default=-1)
     args = parser.parse_args()
