@@ -206,17 +206,46 @@ def parse_causal_completion(part_id, completion_text):
 
     rows = []
     for m in matches:
+        c_loc = normalize_location(m.group(1))
+        c_set = clean_val(m.group(2)).lower()
+        if c_set not in ["indoor", "outdoor"]:
+            c_set = "Unknown"
+
+        c_rel = clean_val(m.group(3))
+        c_gap = clean_val(m.group(4))
+        if c_gap not in ["Peer", "Younger_Gen", "Older_Gen"]:
+            c_gap = "Unknown"
+
+        c_age = clean_val(m.group(5), is_int=True)
+        c_gen = clean_val(m.group(6)).upper()
+        if c_gen not in ["M", "F"]:
+            c_gen = "Unknown"
+
+        c_freq = clean_val(m.group(7))
+        c_phys_raw = clean_val(m.group(8)).lower()
+        if "true" in c_phys_raw or "yes" in c_phys_raw:
+            c_phys = "True"
+        elif "false" in c_phys_raw or "no" in c_phys_raw:
+            c_phys = "False"
+        else:
+            c_phys = "Unknown"
+
+        c_dist = clean_val(m.group(9))
+        # Respect MixIT's deterministic survey coding between Physical Contact and Distance
+        if c_phys == "True":
+            c_dist = "Pychical contact"
+
         rows.append({
             "part_id": str(part_id),
-            "Location of Contact": normalize_location(m.group(1)),
-            "Contact Setting": clean_val(m.group(2)),
-            "Relationship to Participant": clean_val(m.group(3)),
-            "Age_Gap": clean_val(m.group(4)),
-            "Contact Age": clean_val(m.group(5), is_int=True),
-            "Contact Gender": clean_val(m.group(6)),
-            "Contact Frequency": clean_val(m.group(7)),
-            "Physical Contact": clean_val(m.group(8)),
-            "Distance during Contact": clean_val(m.group(9)),
+            "Location of Contact": c_loc,
+            "Contact Setting": c_set,
+            "Relationship to Participant": c_rel,
+            "Age_Gap": c_gap,
+            "Contact Age": c_age,
+            "Contact Gender": c_gen,
+            "Contact Frequency": c_freq,
+            "Physical Contact": c_phys,
+            "Distance during Contact": c_dist,
             "is_zero_contact": False,
             "valid_syntax": True,
             "declared_total": declared_total,

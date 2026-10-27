@@ -5,6 +5,8 @@
 *.png
 *.csv
 
+*.html
+
 __pycache__/
 
 # Ignore large data and cache folders
