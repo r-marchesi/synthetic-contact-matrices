@@ -85,6 +85,7 @@ def build_notebook_and_report(args):
     df_c2st = safe_read_csv(os.path.join(DEEP_DIR, "table5_c2st_ablations.csv"))
     df_imp = safe_read_csv(os.path.join(DEEP_DIR, "table5b_c2st_feature_importances.csv"))
     df_rq2 = safe_read_csv(os.path.join(RQ2_DIR, "rq2_subgroup_leaderboard.csv"))
+    df_rq1 = safe_read_csv(os.path.join(RQ1_DIR, "rq1_scaling_summary.csv"))
     df_ovf_sum = safe_read_csv(os.path.join(DEEP_DIR, "table7_overfitting_summary.csv"))
     df_ovf_deg = safe_read_csv(os.path.join(DEEP_DIR, "table7b_diary_copy_by_degree.csv"))
 
@@ -119,6 +120,7 @@ def build_notebook_and_report(args):
     fig_corr_b64 = encode_image_b64(find_first_matching(os.path.join(DEEP_DIR, "fig4a_correlation_cramers_v_*.png")))
     fig5_b64 = encode_image_b64(os.path.join(DEEP_DIR, "fig5_c2st_diagnostics.png"))
     fig_rq2_b64 = encode_image_b64(os.path.join(RQ2_DIR, "rq2_conditioning_and_subgroups.png"))
+    fig_rq1_b64 = encode_image_b64(os.path.join(RQ1_DIR, "rq1_scaling_curves.png"))
     fig_ovf_b64 = encode_image_b64(os.path.join(DEEP_DIR, "fig7_overfitting_dcr.png"))
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -446,8 +448,18 @@ Total: 3 | Cohabitants: 2 | Non-cohabitants: 1 | Home: 2 | Work: 0 | School: 0 |
     </section>
 
     <!-- SECTION 10 -->
+    <section id="sec-rq1" class="nb-section">
+        <h2>10. RQ1: Dataset Size Scaling Laws (10%, 30%, 50%, 80%, 100%)</h2>
+        {nb_plot(fig_rq1_b64, 9, "RQ1 Scaling Curves: WSMAD [0,1], Matrix MAE, Volume TVD, and Joint C2ST AUC across Training Set Fractions.")}
+        <div class="nb-cell">
+            <div class="nb-prompt out-prompt">Out [11]:</div>
+            <div class="nb-output-table">{df_to_styled_html(df_rq1)}</div>
+        </div>
+    </section>
+
+    <!-- SECTION 11 -->
     <section id="sec-overfit" class="nb-section">
-        <h2>10. Overfitting, Memorization &amp; Novelty Audit</h2>
+        <h2>11. Overfitting, Memorization &amp; Novelty Audit</h2>
         <div class="nb-cell">
             <div class="nb-prompt out-prompt">Out [11]:</div>
             <div class="nb-output-table">{df_to_styled_html(df_ovf_sum, float_fmt="{:.2f}")}</div>
