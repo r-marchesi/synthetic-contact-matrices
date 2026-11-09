@@ -4,7 +4,7 @@ set -e
 PG_EPOCH=${1:-14}
 FF_EPOCH=${2:-14}
 
-SPLITS=("80_percent" "50_percent" "30_percent" "10_percent")
+SPLITS=("30_percent" "10_percent")
 JOB_IDS=()
 
 echo "Submitting 4 parallel Slurm jobs for Exp 07 RQ1 splits (Target Epochs: PG=$PG_EPOCH, FF=$FF_EPOCH)..."
